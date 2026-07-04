@@ -1,0 +1,33 @@
+def cargar_productos(lista_productos):
+    for nombre, precio in lista_productos:
+        nuevo_id = r.incr("id_producto")
+        r.hset(f"producto:{nuevo_id}", mapping=("nombre", nombre, "precio", precio))
+    print(f"Productos cargados. Último ID: {r.get('id_producto')}")
+
+def gestionar_premium(correos_nuevos, eliminar=None):
+    if correos_nuevos:
+        r.sadd("usuarios_premium", *correos_nuevos) 
+    if eliminar:
+        r.srem("usuarios_premium", *eliminar) 
+
+def simular_tareas():
+  
+    r.lpush("prioridad:alta", "Fix bug crítico", "Subir servidor", "Backup DB")
+    r.lpush("prioridad:baja", "Cambiar color botón", "Actualizar readme", "Limpiar log")
+    
+  
+    print("Ejecutando tareas críticas:", r.lrange("prioridad:alta", 0, -1))
+
+ 
+def crear_taoken():
+    r.set("token_acceso", "ABC-123", ex=60) 
+    print(f"Tiempo restante del token: {r.ttl('token_acceso')}s")
+
+if __name__ == "__main__":
+    cargar_productos([("RTX 4060", 300000), ("RAM 16GB", 45000)])
+    gestionar_premium(["pro1@mail.cl", "pro2@mail.cl"], eliminar=["pro1@mail.cl"])
+    simular_tareas()
+    crear_token()
+
+
+    , ("Monitor 144hz", 150000), ("Mouse Vxe", 50000)
