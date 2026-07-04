@@ -1,0 +1,13 @@
+# Entornos virtuales
+venv/
+env/
+
+# Archivos de bases de datos pesados (Se suben a Drive)
+*.csv
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+
+# Archivos del sistema operativo
+.DS_Store
