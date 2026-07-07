@@ -5,6 +5,9 @@ env/
 # Archivos de bases de datos pesados (Se suben a Drive)
 *.csv
 
+# Docker
+*.yml
+
 # Archivos de caché de Python
 __pycache__/
 *.pyc
