@@ -2,6 +2,9 @@
 venv/
 env/
 
+# Configuracion local
+.env
+
 # Archivos de bases de datos pesados (Se suben a Drive)
 *.csv
 

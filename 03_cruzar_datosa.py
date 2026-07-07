@@ -26,9 +26,15 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+EJEMPLOS_CRUCE_POR_DEFECTO = 5
+PLAYLISTS_EJEMPLO = 3
+
 
 def obtener_nombres_neo4j(driver) -> dict:
-    query = "MATCH (c:Cancion) RETURN DISTINCT c.nombre AS nombre"
+    query = (
+        f"MATCH (c:{config.ETIQUETA_CANCION}) "
+        f"RETURN DISTINCT c.{config.PROP_NOMBRE} AS nombre"
+    )
     with driver.session() as session:
         res = session.run(query)
         return {
@@ -37,10 +43,10 @@ def obtener_nombres_neo4j(driver) -> dict:
 
 
 def obtener_nombres_mongo(coleccion) -> dict:
-    res = coleccion.find({}, {"track_name": 1})
+    res = coleccion.find({}, {config.CAMPO_NOMBRE_CANCION: 1})
     dict_mongo = {}
     for doc in res:
-        nombre = doc.get("track_name")
+        nombre = doc.get(config.CAMPO_NOMBRE_CANCION)
         if isinstance(nombre, str):
             dict_mongo[nombre.strip().lower()] = nombre
     return dict_mongo
@@ -53,13 +59,13 @@ def mostrar_ejemplos(coleccion, driver, coincidencias, dict_mongo, dict_neo, n_e
     # Una sola consulta a Mongo para todos los ejemplos, en vez de un
     # find_one() por cada canción.
     perfiles = {
-        doc["track_name"]: doc
-        for doc in coleccion.find({"track_name": {"$in": nombres_originales_mongo}})
+        doc[config.CAMPO_NOMBRE_CANCION]: doc
+        for doc in coleccion.find({config.CAMPO_NOMBRE_CANCION: {"$in": nombres_originales_mongo}})
     }
 
-    query_playlists = """
-    MATCH (u:Usuario)-[r:AGREGO_A_PLAYLIST]->(c:Cancion {nombre: $nombre})
-    RETURN r.playlist AS playlist LIMIT 3
+    query_playlists = f"""
+    MATCH (u:{config.ETIQUETA_USUARIO})-[r:{config.RELACION_AGREGO_PLAYLIST}]->(c:{config.ETIQUETA_CANCION} {{{config.PROP_NOMBRE}: $nombre}})
+    RETURN r.{config.PROP_PLAYLIST} AS playlist LIMIT $limite_playlists
     """
 
     print("\n=======================================================")
@@ -72,11 +78,15 @@ def mostrar_ejemplos(coleccion, driver, coincidencias, dict_mongo, dict_neo, n_e
             nombre_original_neo = dict_neo[nombre_normalizado]
 
             perfil = perfiles.get(nombre_original_mongo, {})
-            genero = perfil.get("track_genre", "Desconocido")
-            energia = perfil.get("energy", "N/A")
-            bailabilidad = perfil.get("danceability", "N/A")
+            genero = perfil.get(config.CAMPO_GENERO, "Desconocido")
+            energia = perfil.get(config.CAMPO_ENERGIA, "N/A")
+            bailabilidad = perfil.get(config.CAMPO_BAILABILIDAD, "N/A")
 
-            res_playlists = session.run(query_playlists, nombre=nombre_original_neo)
+            res_playlists = session.run(
+                query_playlists,
+                nombre=nombre_original_neo,
+                limite_playlists=PLAYLISTS_EJEMPLO,
+            )
             playlists = [rec["playlist"] for rec in res_playlists]
 
             print(f"🎵 Pista: '{nombre_original_mongo}'")
@@ -86,7 +96,7 @@ def mostrar_ejemplos(coleccion, driver, coincidencias, dict_mongo, dict_neo, n_e
             print(f"      - Guardada en las playlists: {', '.join(playlists)}\n")
 
 
-def cruce_definitivo(n_ejemplos: int = 5) -> None:
+def cruce_definitivo(n_ejemplos: int = EJEMPLOS_CRUCE_POR_DEFECTO) -> None:
     config.validar_config()
 
     log.info("Conectando a los motores de bases de datos...")
@@ -97,7 +107,7 @@ def cruce_definitivo(n_ejemplos: int = 5) -> None:
         with pymongo.MongoClient(config.MONGO_URI) as cliente_mongo:
             coleccion_mongo = cliente_mongo[config.MONGO_DB][config.MONGO_COLLECTION]
             # Índice para que futuras búsquedas por nombre sean rápidas.
-            coleccion_mongo.create_index("track_name")
+            coleccion_mongo.create_index(config.CAMPO_NOMBRE_CANCION)
 
             log.info("Extrayendo nombres desde Neo4j...")
             dict_neo = obtener_nombres_neo4j(driver_neo)
@@ -123,7 +133,10 @@ def cruce_definitivo(n_ejemplos: int = 5) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cruza canciones entre MongoDB y Neo4j.")
     parser.add_argument(
-        "--ejemplos", type=int, default=5, help="Cantidad de coincidencias a mostrar en detalle"
+        "--ejemplos",
+        type=int,
+        default=EJEMPLOS_CRUCE_POR_DEFECTO,
+        help="Cantidad de coincidencias a mostrar en detalle",
     )
     return parser.parse_args()
 

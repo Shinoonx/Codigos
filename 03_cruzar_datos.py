@@ -22,6 +22,14 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+CODIFICACION_TEXTO = "utf-8"
+CODIFICACION_ASCII = "ASCII"
+NORMALIZACION_UNICODE = "NFKD"
+PATRON_CONTENIDO_EXTRA = r"[\(\[].*?[\)\]]"
+PATRON_MULETILLAS_SPOTIFY = r"\b(feat\.?|ft\.?|remix|remastered|version|radio edit|live)\b.*"
+PATRON_DESDE_GUION = r"-.*"
+PATRON_NO_ALFANUMERICO = r"[^a-z0-9]"
+
 
 def normalizar_titulo_extremo(nombre: str) -> str:
     """
@@ -33,25 +41,30 @@ def normalizar_titulo_extremo(nombre: str) -> str:
     n = nombre.lower()
     
     # 1. Eliminar contenido entre paréntesis () o corchetes []
-    n = re.sub(r'[\(\[].*?[\)\]]', '', n)
+    n = re.sub(PATRON_CONTENIDO_EXTRA, '', n)
     
     # 2. Cortar muletillas comunes de Spotify (aunque no tengan paréntesis)
-    n = re.sub(r'\b(feat\.?|ft\.?|remix|remastered|version|radio edit|live)\b.*', '', n)
+    n = re.sub(PATRON_MULETILLAS_SPOTIFY, '', n)
     
     # 3. Eliminar todo desde un guion en adelante
-    n = re.sub(r'-.*', '', n)
+    n = re.sub(PATRON_DESDE_GUION, '', n)
     
     # 4. Eliminar tildes y diacríticos (ej. á -> a, ö -> o)
-    n = unicodedata.normalize('NFKD', n).encode('ASCII', 'ignore').decode('utf-8')
+    n = unicodedata.normalize(NORMALIZACION_UNICODE, n).encode(
+        CODIFICACION_ASCII, 'ignore'
+    ).decode(CODIFICACION_TEXTO)
     
     # 5. Aplastar la cadena: eliminar TODOS los espacios y caracteres que no sean letras o números
-    n = re.sub(r'[^a-z0-9]', '', n)
+    n = re.sub(PATRON_NO_ALFANUMERICO, '', n)
     
     return n
 
 
 def obtener_nombres_neo4j(driver) -> dict:
-    query = "MATCH (c:Cancion) RETURN DISTINCT c.nombre AS nombre"
+    query = (
+        f"MATCH (c:{config.ETIQUETA_CANCION}) "
+        f"RETURN DISTINCT c.{config.PROP_NOMBRE} AS nombre"
+    )
     with driver.session() as session:
         res = session.run(query)
         dict_neo = {}
@@ -64,10 +77,10 @@ def obtener_nombres_neo4j(driver) -> dict:
 
 
 def obtener_nombres_mongo(coleccion) -> dict:
-    res = coleccion.find({}, {"track_name": 1})
+    res = coleccion.find({}, {config.CAMPO_NOMBRE_CANCION: 1})
     dict_mongo = {}
     for doc in res:
-        nombre = doc.get("track_name")
+        nombre = doc.get(config.CAMPO_NOMBRE_CANCION)
         if isinstance(nombre, str):
             clave_limpia = normalizar_titulo_extremo(nombre)
             if clave_limpia:
@@ -86,7 +99,7 @@ def cruce_definitivo() -> None:
         with pymongo.MongoClient(config.MONGO_URI) as cliente_mongo:
             coleccion_mongo = cliente_mongo[config.MONGO_DB][config.MONGO_COLLECTION]
             
-            coleccion_mongo.create_index("track_name")
+            coleccion_mongo.create_index(config.CAMPO_NOMBRE_CANCION)
 
             log.info("Extrayendo y aplicando limpieza extrema desde Neo4j...")
             dict_neo = obtener_nombres_neo4j(driver_neo)

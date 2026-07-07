@@ -1,26 +1,8 @@
 """
-Consultas de valor "a nivel empresarial" para BsdSpoty.
-Cada una combina el perfil sonoro (MongoDB) con el comportamiento social
-en playlists (Neo4j) para responder preguntas de negocio concretas.
+Consultas de negocio para BsdSpoty.
 
-Consulta 1: Joyas ocultas
-    Canciones con muy buen perfil sonoro (energía + bailabilidad altas)
-    pero casi nula presencia en playlists. Útil para decidir qué
-    canciones promocionar o priorizar en un feed de "descubrimiento".
-
-Consulta 2: ADN sonoro de las playlists más grandes
-    Perfil de audio promedio de las playlists con más canciones/usuarios
-    únicos. Útil para entender qué combinación sonora "funciona" y
-    replicarla al curar nuevas playlists o al hacer marketing de producto.
-
-Consulta 3: Canciones puente entre géneros
-    Canciones que aparecen en playlists junto a muchos géneros distintos
-    al propio. Son candidatas naturales para recomendaciones cross-género
-    (ampliar el gusto musical de un usuario más allá de su género habitual).
-
-Todas las consultas trabajan sobre la intersección de canciones presentes
-en ambos motores (mismo criterio que 03_cruzar_datos.py), porque ahí es
-donde tenemos both perfil sonoro y datos sociales.
+Cada consulta combina el perfil sonoro guardado en MongoDB con el comportamiento
+social guardado en Neo4j.
 """
 import argparse
 import logging
@@ -34,32 +16,47 @@ import config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
+TOP_RESULTADOS_POR_DEFECTO = 10
+MAX_PLAYLISTS_JOYA_POR_DEFECTO = 1
+MAX_CANCIONES_POR_PLAYLIST = 500
+GENEROS_EJEMPLO = 5
+METRICAS_NEGOCIO = [
+    config.CAMPO_ENERGIA,
+    config.CAMPO_BAILABILIDAD,
+    config.CAMPO_TEMPO,
+    config.CAMPO_VALENCIA,
+    config.CAMPO_POPULARIDAD,
+]
 
-# ---------------------------------------------------------------------------
-# Utilidades compartidas (mismo criterio de cruce que 03_cruzar_datos.py)
-# ---------------------------------------------------------------------------
 
 def obtener_nombres_neo4j(driver) -> dict:
-    query = "MATCH (c:Cancion) RETURN DISTINCT c.nombre AS nombre"
+    query = (
+        f"MATCH (c:{config.ETIQUETA_CANCION}) "
+        f"RETURN DISTINCT c.{config.PROP_NOMBRE} AS nombre"
+    )
     with driver.session() as session:
         res = session.run(query)
         return {str(r["nombre"]).strip().lower(): r["nombre"] for r in res if r["nombre"]}
 
 
 def obtener_perfiles_mongo(coleccion) -> dict:
-    """nombre_normalizado -> documento completo de Mongo (perfil sonoro)."""
-    res = coleccion.find({}, {"track_name": 1, "track_genre": 1, "energy": 1,
-                               "danceability": 1, "tempo": 1, "valence": 1, "popularity": 1})
+    """Devuelve nombre_normalizado -> documento completo de MongoDB."""
+    proyeccion = {
+        config.CAMPO_NOMBRE_CANCION: 1,
+        config.CAMPO_GENERO: 1,
+        **{metrica: 1 for metrica in METRICAS_NEGOCIO},
+    }
+    res = coleccion.find({}, proyeccion)
     perfiles = {}
     for doc in res:
-        nombre = doc.get("track_name")
+        nombre = doc.get(config.CAMPO_NOMBRE_CANCION)
         if isinstance(nombre, str):
             perfiles[nombre.strip().lower()] = doc
     return perfiles
 
 
 def calcular_interseccion(driver, coleccion):
-    log.info("Cargando nombres desde Neo4j y MongoDB para calcular la intersección...")
+    log.info("Cargando nombres desde Neo4j y MongoDB para calcular la interseccion...")
     dict_neo = obtener_nombres_neo4j(driver)
     perfiles_mongo = obtener_perfiles_mongo(coleccion)
     coincidencias = set(dict_neo.keys()) & set(perfiles_mongo.keys())
@@ -67,35 +64,37 @@ def calcular_interseccion(driver, coleccion):
     return coincidencias, dict_neo, perfiles_mongo
 
 
-# ---------------------------------------------------------------------------
-# Consulta 1: Joyas ocultas
-# ---------------------------------------------------------------------------
-
-def consulta_joyas_ocultas(driver, coincidencias, dict_neo, perfiles_mongo,
-                            max_playlists: int = 1, top_n: int = 10):
+def consulta_joyas_ocultas(
+    driver,
+    coincidencias,
+    dict_neo,
+    perfiles_mongo,
+    max_playlists: int = MAX_PLAYLISTS_JOYA_POR_DEFECTO,
+    top_n: int = TOP_RESULTADOS_POR_DEFECTO,
+):
     """Canciones con buen perfil sonoro pero poca presencia social."""
     nombres_originales = [dict_neo[n] for n in coincidencias]
 
-    query = """
+    query = f"""
     UNWIND $nombres AS nombre
-    MATCH (c:Cancion {nombre: nombre})
-    OPTIONAL MATCH (c)<-[r:AGREGO_A_PLAYLIST]-()
-    RETURN nombre, count(DISTINCT r.playlist) AS num_playlists
+    MATCH (c:{config.ETIQUETA_CANCION} {{{config.PROP_NOMBRE}: nombre}})
+    OPTIONAL MATCH (c)<-[r:{config.RELACION_AGREGO_PLAYLIST}]-()
+    RETURN nombre, count(DISTINCT r.{config.PROP_PLAYLIST}) AS num_playlists
     """
     with driver.session() as session:
         res = session.run(query, nombres=nombres_originales)
         exposicion = {rec["nombre"]: rec["num_playlists"] for rec in res}
 
     candidatos = []
-    for n in coincidencias:
-        nombre_original = dict_neo[n]
+    for nombre_normalizado in coincidencias:
+        nombre_original = dict_neo[nombre_normalizado]
         num_playlists = exposicion.get(nombre_original, 0)
         if num_playlists > max_playlists:
             continue
 
-        perfil = perfiles_mongo[n]
-        energia = perfil.get("energy")
-        bailabilidad = perfil.get("danceability")
+        perfil = perfiles_mongo[nombre_normalizado]
+        energia = perfil.get(config.CAMPO_ENERGIA)
+        bailabilidad = perfil.get(config.CAMPO_BAILABILIDAD)
         if energia is None or bailabilidad is None:
             continue
 
@@ -104,25 +103,28 @@ def consulta_joyas_ocultas(driver, coincidencias, dict_neo, perfiles_mongo,
 
     candidatos.sort(key=lambda x: x[0], reverse=True)
 
-    print("\n=== 💎 Consulta 1: Joyas ocultas ===")
-    print(f"(canciones en <= {max_playlists} playlist(s) con mejor score de energía+bailabilidad)\n")
+    print("\n=== Consulta 1: Joyas ocultas ===")
+    print(f"(canciones en <= {max_playlists} playlist(s) con mejor score de energia+bailabilidad)\n")
     for score, num_playlists, nombre, perfil in candidatos[:top_n]:
-        print(f"🎵 {nombre}")
-        print(f"   Score calidad: {score:.2f} | Playlists: {num_playlists} | "
-              f"Género: {perfil.get('track_genre', 'N/A')}")
+        print(f"Cancion: {nombre}")
+        print(
+            f"   Score calidad: {score:.2f} | Playlists: {num_playlists} | "
+            f"Genero: {perfil.get(config.CAMPO_GENERO, 'N/A')}"
+        )
     if not candidatos:
         print("No se encontraron candidatos con los umbrales actuales.")
     return candidatos[:top_n]
 
 
-# ---------------------------------------------------------------------------
-# Consulta 2: ADN sonoro de las playlists más grandes
-# ---------------------------------------------------------------------------
-
-def consulta_adn_playlists(driver, perfiles_mongo, top_n: int = 5, max_canciones_por_playlist: int = 500):
-    query = """
-    MATCH (u:Usuario)-[r:AGREGO_A_PLAYLIST]->(c:Cancion)
-    WITH r.playlist AS playlist, collect(DISTINCT c.nombre) AS canciones, count(DISTINCT u) AS usuarios
+def consulta_adn_playlists(
+    driver,
+    perfiles_mongo,
+    top_n: int = TOP_RESULTADOS_POR_DEFECTO,
+    max_canciones_por_playlist: int = MAX_CANCIONES_POR_PLAYLIST,
+):
+    query = f"""
+    MATCH (u:{config.ETIQUETA_USUARIO})-[r:{config.RELACION_AGREGO_PLAYLIST}]->(c:{config.ETIQUETA_CANCION})
+    WITH r.{config.PROP_PLAYLIST} AS playlist, collect(DISTINCT c.{config.PROP_NOMBRE}) AS canciones, count(DISTINCT u) AS usuarios
     RETURN playlist, canciones, size(canciones) AS num_canciones, usuarios
     ORDER BY num_canciones DESC
     LIMIT $top_n
@@ -131,49 +133,68 @@ def consulta_adn_playlists(driver, perfiles_mongo, top_n: int = 5, max_canciones
         res = session.run(query, top_n=top_n)
         playlists = [dict(rec) for rec in res]
 
-    print("\n=== 🎧 Consulta 2: ADN sonoro de las playlists más grandes ===\n")
+    print("\n=== Consulta 2: ADN sonoro de las playlists mas grandes ===\n")
     resultados = []
-    for p in playlists:
-        nombres_norm = [str(n).strip().lower() for n in p["canciones"][:max_canciones_por_playlist]]
-        perfiles = [perfiles_mongo[n] for n in nombres_norm if n in perfiles_mongo]
+    for playlist in playlists:
+        nombres_norm = [
+            str(nombre).strip().lower()
+            for nombre in playlist["canciones"][:max_canciones_por_playlist]
+        ]
+        perfiles = [perfiles_mongo[nombre] for nombre in nombres_norm if nombre in perfiles_mongo]
 
         if not perfiles:
             continue
 
-        metricas = ["energy", "danceability", "tempo", "valence", "popularity"]
         promedios = {}
-        for m in metricas:
-            valores = [pf[m] for pf in perfiles if pf.get(m) is not None]
-            promedios[m] = sum(valores) / len(valores) if valores else None
+        for metrica in METRICAS_NEGOCIO:
+            valores = [perfil[metrica] for perfil in perfiles if perfil.get(metrica) is not None]
+            promedios[metrica] = sum(valores) / len(valores) if valores else None
 
         generos = defaultdict(int)
-        for pf in perfiles:
-            generos[pf.get("track_genre", "Desconocido")] += 1
+        for perfil in perfiles:
+            generos[perfil.get(config.CAMPO_GENERO, "Desconocido")] += 1
         genero_dominante = max(generos.items(), key=lambda kv: kv[1])[0] if generos else "N/A"
 
-        print(f"📀 Playlist: '{p['playlist']}' ({p['num_canciones']} canciones, {p['usuarios']} usuarios)")
-        print(f"   Género dominante: {genero_dominante}")
-        print(f"   Energía: {promedios['energy']:.2f} | Bailabilidad: {promedios['danceability']:.2f} | "
-              f"Tempo: {promedios['tempo']:.1f} | Valencia: {promedios['valence']:.2f} | "
-              f"Popularidad: {promedios['popularity']:.1f}\n" if all(v is not None for v in promedios.values())
-              else "   (faltan algunas métricas de audio)\n")
+        print(
+            f"Playlist: '{playlist['playlist']}' "
+            f"({playlist['num_canciones']} canciones, {playlist['usuarios']} usuarios)"
+        )
+        print(f"   Genero dominante: {genero_dominante}")
+        if all(valor is not None for valor in promedios.values()):
+            print(
+                f"   Energia: {promedios[config.CAMPO_ENERGIA]:.2f} | "
+                f"Bailabilidad: {promedios[config.CAMPO_BAILABILIDAD]:.2f} | "
+                f"Tempo: {promedios[config.CAMPO_TEMPO]:.1f} | "
+                f"Valencia: {promedios[config.CAMPO_VALENCIA]:.2f} | "
+                f"Popularidad: {promedios[config.CAMPO_POPULARIDAD]:.1f}\n"
+            )
+        else:
+            print("   (faltan algunas metricas de audio)\n")
 
-        resultados.append({"playlist": p["playlist"], "promedios": promedios, "genero_dominante": genero_dominante})
+        resultados.append(
+            {
+                "playlist": playlist["playlist"],
+                "promedios": promedios,
+                "genero_dominante": genero_dominante,
+            }
+        )
 
     return resultados
 
 
-# ---------------------------------------------------------------------------
-# Consulta 3: Canciones puente entre géneros
-# ---------------------------------------------------------------------------
-
-def consulta_puentes_genero(driver, coincidencias, dict_neo, perfiles_mongo, top_n: int = 10):
+def consulta_puentes_genero(
+    driver,
+    coincidencias,
+    dict_neo,
+    perfiles_mongo,
+    top_n: int = TOP_RESULTADOS_POR_DEFECTO,
+):
     nombres_originales = [dict_neo[n] for n in coincidencias]
 
-    query = """
+    query = f"""
     UNWIND $nombres AS nombre
-    MATCH (u:Usuario)-[r:AGREGO_A_PLAYLIST]->(c:Cancion {nombre: nombre})
-    RETURN DISTINCT r.playlist AS playlist, nombre
+    MATCH (u:{config.ETIQUETA_USUARIO})-[r:{config.RELACION_AGREGO_PLAYLIST}]->(c:{config.ETIQUETA_CANCION} {{{config.PROP_NOMBRE}: nombre}})
+    RETURN DISTINCT r.{config.PROP_PLAYLIST} AS playlist, nombre
     """
     with driver.session() as session:
         res = session.run(query, nombres=nombres_originales)
@@ -181,18 +202,15 @@ def consulta_puentes_genero(driver, coincidencias, dict_neo, perfiles_mongo, top
 
     playlist_a_canciones = defaultdict(set)
     cancion_a_playlists = defaultdict(set)
-    for f in filas:
-        playlist_a_canciones[f["playlist"]].add(f["nombre"])
-        cancion_a_playlists[f["nombre"]].add(f["playlist"])
+    for fila in filas:
+        playlist_a_canciones[fila["playlist"]].add(fila["nombre"])
+        cancion_a_playlists[fila["nombre"]].add(fila["playlist"])
 
-    # Género de cada canción (usando el perfil de Mongo)
     genero_por_nombre_original = {
-        dict_neo[n]: perfiles_mongo[n].get("track_genre", "Desconocido") for n in coincidencias
+        dict_neo[n]: perfiles_mongo[n].get(config.CAMPO_GENERO, "Desconocido") for n in coincidencias
     }
-
-    # Géneros presentes en cada playlist
     generos_por_playlist = {
-        playlist: {genero_por_nombre_original.get(c) for c in canciones}
+        playlist: {genero_por_nombre_original.get(cancion) for cancion in canciones}
         for playlist, canciones in playlist_a_canciones.items()
     }
 
@@ -200,8 +218,8 @@ def consulta_puentes_genero(driver, coincidencias, dict_neo, perfiles_mongo, top
     for nombre_original, playlists in cancion_a_playlists.items():
         genero_propio = genero_por_nombre_original.get(nombre_original)
         generos_conectados = set()
-        for pl in playlists:
-            generos_conectados |= generos_por_playlist.get(pl, set())
+        for playlist in playlists:
+            generos_conectados |= generos_por_playlist.get(playlist, set())
         generos_conectados.discard(genero_propio)
         generos_conectados.discard(None)
 
@@ -210,22 +228,23 @@ def consulta_puentes_genero(driver, coincidencias, dict_neo, perfiles_mongo, top
 
     candidatos.sort(key=lambda x: x[0], reverse=True)
 
-    print("\n=== 🌉 Consulta 3: Canciones puente entre géneros ===\n")
+    print("\n=== Consulta 3: Canciones puente entre generos ===\n")
     for score, nombre, genero_propio, generos_conectados in candidatos[:top_n]:
-        muestra_generos = ", ".join(list(generos_conectados)[:5])
-        print(f"🎵 {nombre} (género: {genero_propio})")
-        print(f"   Conecta con {score} género(s) distintos: {muestra_generos}\n")
+        muestra_generos = ", ".join(list(generos_conectados)[:GENEROS_EJEMPLO])
+        print(f"Cancion: {nombre} (genero: {genero_propio})")
+        print(f"   Conecta con {score} genero(s) distintos: {muestra_generos}\n")
     if not candidatos:
         print("No se encontraron canciones puente con los datos actuales.")
 
     return candidatos[:top_n]
 
 
-# ---------------------------------------------------------------------------
-# Orquestación
-# ---------------------------------------------------------------------------
-
-def main(query: str, top_n: int, max_playlists_joya: int):
+def main(
+    query: str,
+    top_n: int,
+    max_playlists_joya: int,
+    max_canciones_playlist: int,
+) -> None:
     config.validar_config()
 
     with GraphDatabase.driver(config.NEO4J_URI, auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)) as driver:
@@ -240,24 +259,54 @@ def main(query: str, top_n: int, max_playlists_joya: int):
                 perfiles_mongo_completos = obtener_perfiles_mongo(coleccion)
 
             if query in ("1", "all"):
-                consulta_joyas_ocultas(driver, coincidencias, dict_neo, perfiles_mongo,
-                                        max_playlists=max_playlists_joya, top_n=top_n)
+                consulta_joyas_ocultas(
+                    driver,
+                    coincidencias,
+                    dict_neo,
+                    perfiles_mongo,
+                    max_playlists=max_playlists_joya,
+                    top_n=top_n,
+                )
             if query in ("2", "all"):
-                consulta_adn_playlists(driver, perfiles_mongo_completos, top_n=top_n)
+                consulta_adn_playlists(
+                    driver,
+                    perfiles_mongo_completos,
+                    top_n=top_n,
+                    max_canciones_por_playlist=max_canciones_playlist,
+                )
             if query in ("3", "all"):
                 consulta_puentes_genero(driver, coincidencias, dict_neo, perfiles_mongo, top_n=top_n)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Consultas de negocio sobre BsdSpoty.")
-    parser.add_argument("--query", choices=["1", "2", "3", "all"], default="all",
-                         help="Qué consulta correr (por defecto: todas)")
-    parser.add_argument("--top", type=int, default=10, help="Cantidad de resultados a mostrar")
-    parser.add_argument("--max-playlists-joya", type=int, default=1,
-                         help="Umbral de presencia social para considerar 'joya oculta'")
+    parser.add_argument(
+        "--query",
+        choices=["1", "2", "3", "all"],
+        default="all",
+        help="Consulta a ejecutar",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=TOP_RESULTADOS_POR_DEFECTO,
+        help="Cantidad de resultados a mostrar",
+    )
+    parser.add_argument(
+        "--max-playlists-joya",
+        type=int,
+        default=MAX_PLAYLISTS_JOYA_POR_DEFECTO,
+        help="Umbral de presencia social para considerar una joya oculta",
+    )
+    parser.add_argument(
+        "--max-canciones-playlist",
+        type=int,
+        default=MAX_CANCIONES_POR_PLAYLIST,
+        help="Maximo de canciones por playlist para calcular promedios",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args.query, args.top, args.max_playlists_joya)
+    main(args.query, args.top, args.max_playlists_joya, args.max_canciones_playlist)
